@@ -13,6 +13,7 @@ Features:
 """
 
 import asyncio
+import base64
 import html
 import json
 import logging
@@ -47,6 +48,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "School_Uniform_Inventory").strip()
 GOOGLE_SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "credentials.json").strip()
 GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+GOOGLE_SERVICE_ACCOUNT_BASE64 = os.getenv("GOOGLE_SERVICE_ACCOUNT_BASE64", "").strip()
 STORE_CONTACT_USERNAME = os.getenv("STORE_CONTACT_USERNAME", "bNha_dev").strip().lstrip("@")
 STORE_PHONE_NUMBER = os.getenv("STORE_PHONE_NUMBER", "+855 99 382 751").strip()
 
@@ -364,11 +366,23 @@ class InventoryManager:
             "https://www.googleapis.com/auth/drive",
         ]
 
-        if GOOGLE_SERVICE_ACCOUNT_JSON:
+        raw_creds = GOOGLE_SERVICE_ACCOUNT_BASE64 or GOOGLE_SERVICE_ACCOUNT_JSON
+        if raw_creds:
             try:
-                info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+                # 1. Check if the string is Base64 encoded
+                if not raw_creds.startswith("{"):
+                    try:
+                        raw_creds = base64.b64decode(raw_creds).decode("utf-8")
+                    except Exception:
+                        pass
+                # 2. Strip wrapping quotes if added by environment variable parsers
+                if (raw_creds.startswith("'") and raw_creds.endswith("'")) or (
+                    raw_creds.startswith('"') and raw_creds.endswith('"')
+                ):
+                    raw_creds = raw_creds[1:-1]
+                info = json.loads(raw_creds)
                 credentials = Credentials.from_service_account_info(info, scopes=scopes)
-                logger.info("Using Google Service Account credentials from GOOGLE_SERVICE_ACCOUNT_JSON environment variable.")
+                logger.info("Using Google Service Account credentials from environment variable.")
             except Exception as e:
                 raise ValueError(f"Invalid GOOGLE_SERVICE_ACCOUNT_JSON environment variable: {e}")
         else:

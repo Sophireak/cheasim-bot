@@ -157,6 +157,7 @@ STRINGS: Dict[str, Dict[str, str]] = {
         "admin_low_items": "ស្តុកនៅសល់តិច",
         "admin_out_items": "អស់ពីស្តុក",
         "admin_btn_edit": "✏️ កែប្រែស្តុកទំនិញ",
+        "admin_btn_sales": "📊 របាយការណ៍លក់ថ្ងៃនេះ (POS)",
         "admin_btn_alert": "⚠️ ដាស់តឿនស្តុកតិច",
         "admin_btn_sync": "🔄 ធ្វើសមកាលកម្ម Sheet",
         "admin_btn_exit": "🏠 ត្រឡប់ទៅម៉ឺនុយដើម",
@@ -173,6 +174,11 @@ STRINGS: Dict[str, Dict[str, str]] = {
         "admin_back_sizes": "⬅️ ថយទៅទំហំ",
         "admin_well_stocked": "✅ <b>ស្តុកទំនិញគ្រប់គ្រាន់ទាំងអស់!</b>\n━━━━━━━━━━━━━━━━━━\nមិនមានទំនិញណាដែលអស់ពីស្តុក ឬនៅសល់តិចនោះឡើយ។",
         "admin_low_title": "⚠️ <b>ទំនិញអស់ ឬនៅសល់តិច</b>",
+        "admin_sales_title": "របាយការណ៍លក់ប្រចាំថ្ងៃ (POS)",
+        "admin_sales_units": "ចំនួនលក់ចេញសរុប",
+        "admin_sales_rev": "ចំណូលលក់សរុប",
+        "admin_sales_empty": "មិនទាន់មានការលក់ចេញនៅថ្ងៃនេះនៅឡើយទេ។",
+        "admin_sales_recent": "បញ្ជីទំនិញដែលបានលក់ចេញថ្ងៃនេះ:",
     },
     "en": {
         "switch_btn": "🇰🇭 ប្តូរទៅភាសាខ្មែរ",
@@ -247,6 +253,7 @@ STRINGS: Dict[str, Dict[str, str]] = {
         "admin_low_items": "Low Stock Variations",
         "admin_out_items": "Out of Stock Variations",
         "admin_btn_edit": "✏️ Manage & Edit Stock",
+        "admin_btn_sales": "📊 Today's Sales (POS)",
         "admin_btn_alert": "⚠️ Low Stock Alert",
         "admin_btn_sync": "🔄 Force Sync with Sheet",
         "admin_btn_exit": "🏠 Exit to Main Menu",
@@ -263,6 +270,11 @@ STRINGS: Dict[str, Dict[str, str]] = {
         "admin_back_sizes": "⬅️ Back to Sizes",
         "admin_well_stocked": "✅ <b>All Uniforms Are Well Stocked!</b>\n━━━━━━━━━━━━━━━━━━\nThere are currently no depleted or low-stock items in inventory.",
         "admin_low_title": "⚠️ <b>Low Stock & Depleted Items</b>",
+        "admin_sales_title": "Daily Sales Report (POS)",
+        "admin_sales_units": "Total Units Sold",
+        "admin_sales_rev": "Total Revenue",
+        "admin_sales_empty": "No sales logged today yet.",
+        "admin_sales_recent": "Recent Sales Today:",
     },
 }
 
@@ -295,6 +307,20 @@ def format_riel_price(val: Any) -> str:
         return f"{riel:,} ៛"
     except (ValueError, TypeError):
         return f"{val} ៛"
+
+
+def parse_riel_amount(val: Any) -> int:
+    """Parses any price cell into an integer Riel amount."""
+    if val is None or val == "":
+        return 0
+    clean = str(val).replace("$", "").replace("៛", "").replace(",", "").strip()
+    try:
+        num = float(clean)
+        if num < 100:
+            return int(num * 4000)
+        return int(num)
+    except (ValueError, TypeError):
+        return 0
 
 
 def parse_quantity(val: Any) -> int:
@@ -355,6 +381,9 @@ class InventoryManager:
         self.categories: List[str] = []
         self.items_by_cat: Dict[int, List[str]] = {}
         self.variations_by_cat_item: Dict[Tuple[int, int], List[Dict[str, Any]]] = {}
+
+        # In-memory daily sales transactions cache
+        self.today_sales: List[Dict[str, Any]] = []
 
         self.client: Optional[gspread.Client] = None
         self._worksheet: Optional[gspread.Worksheet] = None
@@ -466,6 +495,117 @@ class InventoryManager:
             asyncio.create_task(asyncio.to_thread(self._update_sheet_cell_sync, row_num, new_qty))
 
         return True, new_qty
+
+    def _log_sale_sync(
+        self,
+        date_str: str,
+        time_str: str,
+        cat_name: str,
+        item_name: str,
+        size: str,
+        qty: int,
+        unit_price_raw: Any,
+        unit_price_riel: int,
+        total_riel: int,
+        staff_name: str,
+    ) -> bool:
+        """Appends sale record to 'Sales_Log' worksheet in Google Sheets."""
+        try:
+            if self.client is None:
+                self._init_client()
+            assert self.client is not None
+            spreadsheet = self.client.open(self.sheet_name)
+            try:
+                sales_ws = spreadsheet.worksheet("Sales_Log")
+            except gspread.WorksheetNotFound:
+                sales_ws = spreadsheet.add_worksheet(title="Sales_Log", rows=1000, cols=10)
+                sales_ws.append_row(
+                    [
+                        "Date",
+                        "Time",
+                        "Department",
+                        "Item Name",
+                        "Size",
+                        "Quantity",
+                        "Unit Price Raw",
+                        "Unit Price (៛)",
+                        "Total (៛)",
+                        "Staff Member",
+                    ]
+                )
+            sales_ws.append_row(
+                [
+                    date_str,
+                    time_str,
+                    cat_name,
+                    item_name,
+                    size,
+                    qty,
+                    str(unit_price_raw),
+                    unit_price_riel,
+                    total_riel,
+                    staff_name,
+                ]
+            )
+            logger.info("Logged sale to 'Sales_Log' sheet: %s %s x%d (%d ៛)", item_name, size, qty, total_riel)
+            return True
+        except Exception as e:
+            logger.error("Failed to append sale row to Google Sheet: %s", e)
+            return False
+
+    def log_sale(
+        self,
+        cat_name: str,
+        item_name: str,
+        size: str,
+        qty: int,
+        unit_price_raw: Any,
+        staff_name: str,
+    ) -> int:
+        """
+        Logs a sale transaction in RAM cache immediately, then writes to 'Sales_Log' in Google Sheets in background.
+        Returns total Riel amount.
+        """
+        now = time.localtime()
+        date_str = time.strftime("%d-%b-%Y", now)
+        time_str = time.strftime("%I:%M %p", now)
+        unit_riel = parse_riel_amount(unit_price_raw)
+        total_riel = unit_riel * qty
+
+        sale_record = {
+            "date": date_str,
+            "time": time_str,
+            "cat_name": cat_name,
+            "item_name": item_name,
+            "size": size,
+            "qty": qty,
+            "unit_price_raw": unit_price_raw,
+            "unit_riel": unit_riel,
+            "total_riel": total_riel,
+            "staff_name": staff_name,
+        }
+        self.today_sales.append(sale_record)
+
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(
+                asyncio.to_thread(
+                    self._log_sale_sync,
+                    date_str,
+                    time_str,
+                    cat_name,
+                    item_name,
+                    size,
+                    qty,
+                    unit_price_raw,
+                    unit_riel,
+                    total_riel,
+                    staff_name,
+                )
+            )
+        except RuntimeError:
+            pass
+        return total_riel
 
     def get_stock_metrics(self) -> Dict[str, Any]:
         """Computes low-stock and out-of-stock items across all departments."""
@@ -838,9 +978,62 @@ def get_admin_dashboard_view(user: Optional[User], lang: str = "km") -> Tuple[st
     alert_label = f"{s['admin_btn_alert']} ({attention_total})"
     keyboard = [
         [InlineKeyboardButton(s["admin_btn_edit"], callback_data="adm:cats")],
+        [InlineKeyboardButton(s["admin_btn_sales"], callback_data="adm:sales")],
         [InlineKeyboardButton(alert_label, callback_data="adm:low")],
         [InlineKeyboardButton(s["admin_btn_sync"], callback_data="adm:sync")],
         [InlineKeyboardButton(s["admin_btn_exit"], callback_data="nav:main")],
+    ]
+    return text, InlineKeyboardMarkup(keyboard)
+
+
+def get_admin_sales_view(lang: str = "km") -> Tuple[str, InlineKeyboardMarkup]:
+    """Renders the Daily Sales & Revenue POS dashboard."""
+    s = STRINGS.get(lang, STRINGS["km"])
+    today_str = time.strftime("%d-%b-%Y")
+    sales = inventory_mgr.today_sales
+    total_units = sum(sale["qty"] for sale in sales)
+    total_rev = sum(sale["total_riel"] for sale in sales)
+
+    if lang == "km":
+        text = (
+            f"📊 <b>{s['admin_sales_title']}</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"📅 <b>កាលបរិច្ឆេទ:</b> {today_str}\n"
+            f"👕 <b>{s['admin_sales_units']}:</b> <b>{total_units}</b> ឯកសណ្ឋាន\n"
+            f"💰 <b>{s['admin_sales_rev']}:</b> <b>{format_riel_price(total_rev)}</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+        )
+        if not sales:
+            text += f"<i>{s['admin_sales_empty']}</i>\n"
+        else:
+            text += f"<b>📦 {s['admin_sales_recent']}</b>\n"
+            for sale in sales[-10:]:
+                text += (
+                    f"├ {sale['time']} • <b>{html.escape(sale['item_name'])} ({html.escape(sale['size'])})</b> "
+                    f"x{sale['qty']} = {format_riel_price(sale['total_riel'])}\n"
+                )
+    else:
+        text = (
+            f"📊 <b>Daily Sales Report (POS)</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"📅 <b>Date:</b> {today_str}\n"
+            f"👕 <b>Total Units Sold:</b> <b>{total_units}</b> items\n"
+            f"💰 <b>Total Revenue:</b> <b>{format_riel_price(total_rev)}</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+        )
+        if not sales:
+            text += "<i>No sales logged today yet.</i>\n"
+        else:
+            text += "<b>📦 Recent Sales Today:</b>\n"
+            for sale in sales[-10:]:
+                text += (
+                    f"├ {sale['time']} • <b>{html.escape(sale['item_name'])} ({html.escape(sale['size'])})</b> "
+                    f"x{sale['qty']} = {format_riel_price(sale['total_riel'])}\n"
+                )
+
+    keyboard = [
+        [InlineKeyboardButton("🔄 Refresh Sales" if lang == "en" else "🔄 ផ្ទុកទិន្នន័យឡើងវិញ", callback_data="adm:sales")],
+        [InlineKeyboardButton(s["admin_btn_dash"], callback_data="adm:dash")],
     ]
     return text, InlineKeyboardMarkup(keyboard)
 
@@ -1099,6 +1292,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
             if data == "adm:dash":
                 text, reply_markup = get_admin_dashboard_view(update.effective_user, lang=lang)
+            elif data == "adm:sales":
+                text, reply_markup = get_admin_sales_view(lang=lang)
             elif data == "adm:cats":
                 text, reply_markup = get_admin_categories_view(lang=lang)
             elif data == "adm:low":
@@ -1124,12 +1319,50 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 c_idx, i_idx, v_idx, delta = int(parts[2]), int(parts[3]), int(parts[4]), int(parts[5])
                 vars_list = inventory_mgr.variations_by_cat_item.get((c_idx, i_idx), [])
                 if v_idx < len(vars_list):
-                    cur_qty = parse_quantity(vars_list[v_idx].get("Quantity", 0))
+                    var_data = vars_list[v_idx]
+                    cur_qty = parse_quantity(var_data.get("Quantity", 0))
                     new_qty = max(0, cur_qty + delta)
                     await inventory_mgr.update_stock(c_idx, i_idx, v_idx, new_qty)
-                    sign = f"+{delta}" if delta > 0 else str(delta)
-                    toast = f"✅ កែប្រែជោគជ័យ ({sign}): សល់ {new_qty}!" if lang == "km" else f"✅ Updated ({sign}): Now {new_qty}!"
+
+                    cat_name = inventory_mgr.categories[c_idx] if c_idx < len(inventory_mgr.categories) else "Uniform"
+                    item_names = inventory_mgr.items_by_cat.get(c_idx, [])
+                    item_name = item_names[i_idx] if i_idx < len(item_names) else "Item"
+                    size = get_row_field(var_data, "Size / Variation", "Size", "size", "ទំហំ") or "Standard"
+                    price_raw = get_row_field(var_data, "Price (៛)", "Price ($)", "Price", "price", "តម្លៃ", "ថ្លៃ") or 0
+                    admin_name = update.effective_user.first_name if update.effective_user else "Admin"
+
+                    if delta < 0:
+                        sold_qty = abs(delta)
+                        total_riel = inventory_mgr.log_sale(cat_name, item_name, size, sold_qty, price_raw, admin_name)
+                        toast = (
+                            f"💵 លក់ចេញ {sold_qty} ({format_riel_price(total_riel)})! ស្តុកសល់ {new_qty}"
+                            if lang == "km"
+                            else f"💵 Sold {sold_qty} ({format_riel_price(total_riel)})! Stock now: {new_qty}"
+                        )
+                    else:
+                        toast = f"✅ បញ្ចូលស្តុក (+{delta}): សល់ {new_qty}!" if lang == "km" else f"✅ Added (+{delta}): Now {new_qty}!"
+
                     await query.answer(toast, show_alert=False)
+
+                    # Proactive Push Alert to Admin if item is depleted (reached 0)
+                    if new_qty == 0 and cur_qty > 0:
+                        for a_id in ADMIN_USER_IDS:
+                            try:
+                                alert_text = (
+                                    f"🚨 <b>ដាស់តឿនទំនិញអស់ពីស្តុក (Out of Stock)!</b>\n"
+                                    "━━━━━━━━━━━━━━━━━━\n"
+                                    f"👕 ទំនិញ: <b>{html.escape(item_name)} ({html.escape(size)})</b>\n"
+                                    f"📁 ផ្នែក: {html.escape(cat_name)}\n"
+                                    f"⚠️ ចំនួនក្នុងស្តុកបច្ចុប្បន្ន: <b>0</b> (អស់ពីស្តុក)\n"
+                                    f"👤 អ្នកលក់/កែប្រែ: {html.escape(admin_name)}"
+                                )
+                                await context.bot.send_message(
+                                    chat_id=int(a_id),
+                                    text=alert_text,
+                                    parse_mode=ParseMode.HTML,
+                                )
+                            except Exception as e:
+                                logger.warning("Could not send alert to admin %s: %s", a_id, e)
                 text, reply_markup = get_admin_variation_editor_view(c_idx, i_idx, v_idx, lang=lang)
             elif data.startswith("adm:set:"):
                 parts = data.split(":")

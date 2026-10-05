@@ -169,6 +169,13 @@ STRINGS: Dict[str, Dict[str, str]] = {
         "admin_sales_rev": "ចំណូលលក់សរុប",
         "admin_sales_empty": "មិនទាន់មានការលក់ចេញនៅថ្ងៃនេះនៅឡើយទេ។",
         "admin_sales_recent": "បញ្ជីទំនិញដែលបានលក់ចេញថ្ងៃនេះ:",
+        "admin_btn_data": "⚙️ គ្រប់គ្រងទិន្នន័យ (Data Tools)",
+        "admin_data_title": "ផ្ទាំងគ្រប់គ្រងទិន្នន័យ & សម្អាតតេស្ត",
+        "admin_btn_clear_sales": "🗑 សម្អាតកំណត់ត្រាលក់តេស្ត",
+        "admin_clear_confirm_prompt": "⚠️ <b>បញ្ជាក់ការសម្អាតទិន្នន័យតេស្ត</b>\n━━━━━━━━━━━━━━━━━━\nតើអ្នកប្រាកដជាចង់លុបកំណត់ត្រាលក់ទាំងអស់នៅក្នុង <b>Sales_Log</b> មែនទេ?\n\n• ចំនួនលក់ចេញថ្ងៃនេះនឹងត្រូវបានកំណត់ជា 0 ឡើងវិញ\n• ទិន្នន័យមុខទំនិញ និងស្តុកក្នុងសន្លឹក <b>Stock</b> នឹងនៅដដែលមិនបាត់បង់ឡើយ\n• កំណត់ត្រាលក់ថ្មីបន្ទាប់ពីនេះ នឹងជាការលក់ពិតប្រាកដ",
+        "admin_btn_confirm_clear": "⚠️ បញ្ជាក់លុបទិន្នន័យតេស្ត",
+        "admin_btn_cancel": "❌ បោះបង់",
+        "admin_sales_cleared_toast": "✅ បានសម្អាតកំណត់ត្រាលក់តេស្តក្នុង Google Sheet រួចរាល់!",
     },
     "en": {
         "switch_btn": "🇰🇭 ប្តូរទៅភាសាខ្មែរ",
@@ -255,6 +262,13 @@ STRINGS: Dict[str, Dict[str, str]] = {
         "admin_sales_rev": "Total Revenue",
         "admin_sales_empty": "No sales logged today yet.",
         "admin_sales_recent": "Recent Sales Today:",
+        "admin_btn_data": "⚙️ Data Management Tools",
+        "admin_data_title": "Data Management & Test Reset",
+        "admin_btn_clear_sales": "🗑 Clear Test Sales Logs",
+        "admin_clear_confirm_prompt": "⚠️ <b>Confirm Test Data Reset</b>\n━━━━━━━━━━━━━━━━━━\nAre you sure you want to clear all transactions from <b>Sales_Log</b>?\n\n• Today's sales count and revenue will be reset to 0\n• Items and stock levels in the <b>Stock</b> sheet will remain completely untouched\n• All subsequent sales will be logged cleanly for live production",
+        "admin_btn_confirm_clear": "⚠️ Yes, Clear Test Sales",
+        "admin_btn_cancel": "❌ Cancel",
+        "admin_sales_cleared_toast": "✅ Test sales logs cleared from Google Sheets!",
     },
 }
 
@@ -586,6 +600,32 @@ class InventoryManager:
         except RuntimeError:
             pass
         return total_riel
+
+    def _clear_sales_log_sync(self) -> bool:
+        """Clears rows 2+ in 'Sales_Log' worksheet, preserving Row 1 headers."""
+        try:
+            if self.client is None:
+                self._init_client()
+            assert self.client is not None
+            spreadsheet = self.client.open(self.sheet_name)
+            try:
+                sales_ws = spreadsheet.worksheet("Sales_Log")
+                # Resize to 1 row (keeps row 1 headers), then expand back to 1000 rows
+                sales_ws.resize(rows=1)
+                sales_ws.resize(rows=1000)
+                logger.info("Successfully cleared test sales from 'Sales_Log' in Google Sheets.")
+                return True
+            except gspread.WorksheetNotFound:
+                logger.info("'Sales_Log' worksheet not found in Google Sheets, nothing to clear.")
+                return True
+        except Exception as e:
+            logger.error("Failed to clear sales log from Google Sheets: %s", e)
+            return False
+
+    async def clear_test_sales(self) -> bool:
+        """Clears in-memory sales log and purges test rows in Google Sheets."""
+        self.today_sales.clear()
+        return await asyncio.to_thread(self._clear_sales_log_sync)
 
     def get_stock_metrics(self) -> Dict[str, Any]:
         """Computes low-stock and out-of-stock items across all departments."""
@@ -958,8 +998,65 @@ def get_admin_dashboard_view(user: Optional[User], lang: str = "km") -> Tuple[st
         [InlineKeyboardButton(s["admin_btn_edit"], callback_data="adm:cats")],
         [InlineKeyboardButton(s["admin_btn_sales"], callback_data="adm:sales")],
         [InlineKeyboardButton(alert_label, callback_data="adm:low")],
-        [InlineKeyboardButton(s["admin_btn_sync"], callback_data="adm:sync")],
+        [
+            InlineKeyboardButton(s["admin_btn_sync"], callback_data="adm:sync"),
+            InlineKeyboardButton(s["admin_btn_data"], callback_data="adm:data"),
+        ],
         [InlineKeyboardButton(s["admin_btn_exit"], callback_data="nav:main")],
+    ]
+    return text, InlineKeyboardMarkup(keyboard)
+
+
+def get_admin_data_view(lang: str = "km") -> Tuple[str, InlineKeyboardMarkup]:
+    """Renders the Data Management and Test Reset view for Admin."""
+    s = STRINGS.get(lang, STRINGS["km"])
+    sheet_name = inventory_mgr.sheet_name
+    sales_count = len(inventory_mgr.today_sales)
+    total_rev = sum(sale["total_riel"] for sale in inventory_mgr.today_sales)
+    metrics = inventory_mgr.get_stock_metrics()
+
+    if lang == "km":
+        text = (
+            f"⚙️ <b>{s['admin_data_title']}</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"📄 <b>Google Sheet:</b> <code>{sheet_name}</code>\n"
+            f"📦 <b>មុខទំនិញក្នុងស្តុក:</b> {metrics['total_items']} មុខ\n"
+            f"📊 <b>ប្រតិបត្តិការលក់ថ្ងៃនេះ:</b> {sales_count} ដង ({format_riel_price(total_rev)})\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "💡 <i>បន្ទាប់ពីបញ្ចប់ការតេស្ត លោកអ្នកអាចចុចសម្អាតកំណត់ត្រាលក់ខាងក្រោម ដើម្បីត្រៀមដំណើរការលក់ពិតប្រាកដ។</i>\n\n"
+            f"👇 <i>{s['prompt_select']}</i>"
+        )
+    else:
+        text = (
+            f"⚙️ <b>{s['admin_data_title']}</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"📄 <b>Google Sheet:</b> <code>{sheet_name}</code>\n"
+            f"📦 <b>Stocked Items:</b> {metrics['total_items']} items\n"
+            f"📊 <b>Today's Active Sales:</b> {sales_count} tx ({format_riel_price(total_rev)})\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "💡 <i>After testing, you can purge test transactions below to prepare for live operations.</i>\n\n"
+            f"👇 <i>{s['prompt_select']}</i>"
+        )
+
+    keyboard = [
+        [InlineKeyboardButton(s["admin_btn_clear_sales"], callback_data="adm:clr:ask")],
+        [InlineKeyboardButton(s["admin_btn_sync"], callback_data="adm:sync")],
+        [InlineKeyboardButton(s["admin_btn_dash"], callback_data="adm:dash")],
+    ]
+    return text, InlineKeyboardMarkup(keyboard)
+
+
+def get_admin_data_confirm_view(lang: str = "km") -> Tuple[str, InlineKeyboardMarkup]:
+    """Renders double-confirmation prompt before purging test sales."""
+    s = STRINGS.get(lang, STRINGS["km"])
+    text = (
+        f"{s['admin_clear_confirm_prompt']}\n\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"👇 <i>{s['prompt_select']}</i>"
+    )
+    keyboard = [
+        [InlineKeyboardButton(s["admin_btn_confirm_clear"], callback_data="adm:clr:do")],
+        [InlineKeyboardButton(s["admin_btn_cancel"], callback_data="adm:data")],
     ]
     return text, InlineKeyboardMarkup(keyboard)
 
@@ -1272,6 +1369,16 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 text, reply_markup = get_admin_dashboard_view(update.effective_user, lang=lang)
             elif data == "adm:sales":
                 text, reply_markup = get_admin_sales_view(lang=lang)
+            elif data == "adm:data":
+                text, reply_markup = get_admin_data_view(lang=lang)
+            elif data == "adm:clr:ask":
+                text, reply_markup = get_admin_data_confirm_view(lang=lang)
+            elif data == "adm:clr:do":
+                await inventory_mgr.clear_test_sales()
+                s = STRINGS.get(lang, STRINGS["km"])
+                toast = s["admin_sales_cleared_toast"]
+                await query.answer(toast, show_alert=True)
+                text, reply_markup = get_admin_data_view(lang=lang)
             elif data == "adm:cats":
                 text, reply_markup = get_admin_categories_view(lang=lang)
             elif data == "adm:low":

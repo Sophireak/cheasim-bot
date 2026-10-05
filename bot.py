@@ -87,30 +87,20 @@ STRINGS: Dict[str, Dict[str, str]] = {
     "km": {
         "switch_btn": "🇬🇧 Switch to English",
         "switch_target": "en",
-        "btn_stock": "👕 ពិនិត្យស្តុក",
-        "btn_guide": "📏 តារាងទំហំ",
+        "btn_stock": "👕 ពិនិត្យស្តុក & តម្លៃ",
+        "btn_guide": "📏 របៀបវាស់ទំហំ",
         "btn_policy": "🔄 គោលការណ៍ហាង",
-        "btn_contact": "💬 ទំនាក់ទំនងបុគ្គលិក",
+        "btn_contact": "💬 ឆាតទៅអ្នកលក់",
+        "btn_chat_order": "💬 ឆាតកក់ទំនិញនេះ",
         "btn_admin": "🛠 គ្រប់គ្រងស្តុក",
         "btn_main_menu": "🏠 ម៉ឺនុយដើម",
         "btn_back": "⬅️ ថយក្រោយ",
         "btn_refresh": "🔄 ផ្ទុកស្តុកឡើងវិញ",
         "btn_chat_staff": "💬 ផ្ញើសារតាម Telegram",
         "welcome_title": "ហាងឯកសណ្ឋាន សាលាបឋមសិក្សា សម្តេចជាស៊ីម",
-        "parent_info": "ព័ត៌មានអាណាព្យាបាល",
-        "name_label": "ឈ្មោះ",
-        "id_label": "លេខសម្គាល់",
-        "username_label": "គណនី",
-        "not_set": "មិនមាន",
-        "store_info": "ព័ត៌មានហាង",
+        "store_intro": "លោកអ្នកអាចពិនិត្យមើលស្តុកទំនិញជាក់ស្តែង តម្លៃ និងទំហំឯកសណ្ឋានសិស្សបានយ៉ាងងាយស្រួល។",
         "location_val": "សាលាបឋមសិក្សា សម្តេចជាស៊ីម",
-        "hours_val": "ច័ន្ទ - សៅរ៍, 8:30 AM - 4:00 PM",
-        "stock_sync_val": "ផ្សារភ្ជាប់ផ្ទាល់ពី Google Sheets",
-        "services_title": "សេវាកម្ម",
-        "service_1": "👕 ពិនិត្យមើលស្តុកទំនិញជាក់ស្តែង",
-        "service_2": "📏 របៀបវាស់ទំហំឯកសណ្ឋានសិស្ស",
-        "service_3": "🔄 គោលការណ៍ប្តូរទំនិញ ៧ថ្ងៃ",
-        "service_4": "💬 ទំនាក់ទំនងបុគ្គលិកហាង",
+        "hours_val": "ច័ន្ទ – សៅរ៍ (8:30 AM – 4:00 PM)",
         "prompt_select": "សូមជ្រើសរើសជម្រើសខាងក្រោម:",
         "dept_title": "ផ្នែកឯកសណ្ឋាន",
         "dept_select_prompt": "សូមជ្រើសរើសផ្នែកឯកសណ្ឋានខាងក្រោម ដើម្បីពិនិត្យមើលទំនិញ និងស្តុកជាក់ស្តែង:",
@@ -183,30 +173,20 @@ STRINGS: Dict[str, Dict[str, str]] = {
     "en": {
         "switch_btn": "🇰🇭 ប្តូរទៅភាសាខ្មែរ",
         "switch_target": "km",
-        "btn_stock": "👕 Check Stock",
+        "btn_stock": "👕 Check Stock & Prices",
         "btn_guide": "📏 Size Guide",
         "btn_policy": "🔄 Shop Policy",
-        "btn_contact": "💬 Contact Staff",
+        "btn_contact": "💬 Chat with Staff",
+        "btn_chat_order": "💬 Chat to Order / Reserve",
         "btn_admin": "🛠 Stock Controller",
         "btn_main_menu": "🏠 Main Menu",
         "btn_back": "⬅️ Back",
         "btn_refresh": "🔄 Refresh Stock",
         "btn_chat_staff": "💬 Chat on Telegram",
         "welcome_title": "Chea Sim Primary School Uniform Shop",
-        "parent_info": "Parent Info",
-        "name_label": "Name",
-        "id_label": "User ID",
-        "username_label": "Username",
-        "not_set": "Not set",
-        "store_info": "Store Details",
+        "store_intro": "Check live uniform stock, sizes, and prices easily.",
         "location_val": "Samdach Chea Sim Primary School",
-        "hours_val": "Mon – Sat, 8:30 AM – 4:00 PM",
-        "stock_sync_val": "Live Google Sheets Sync",
-        "services_title": "Services",
-        "service_1": "👕 Check Live Uniform Stock",
-        "service_2": "📏 Student Size Measurement Guide",
-        "service_3": "🔄 7-Day Exchange & Return Policy",
-        "service_4": "💬 Contact Uniform Shop Staff",
+        "hours_val": "Mon – Sat (8:30 AM – 4:00 PM)",
         "prompt_select": "Please select an option below:",
         "dept_title": "Uniform Departments",
         "dept_select_prompt": "Select a department below to view available items & live stock levels:",
@@ -727,44 +707,40 @@ inventory_mgr = InventoryManager(
 # VIEW BUILDERS (Localized by lang parameter)
 # ==============================================================================
 def get_main_menu_view(user: Optional[User] = None, lang: str = "km") -> Tuple[str, InlineKeyboardMarkup]:
-    """Renders the Main Menu screen with language switch button."""
+    """Renders the Main Menu screen with a clean, friendly, parent-first design."""
     s = STRINGS.get(lang, STRINGS["km"])
     default_name = "អាណាព្យាបាល" if lang == "km" else "Parent"
-    name = html.escape(user.full_name) if user and user.full_name else default_name
-    user_id = str(user.id) if user else "N/A"
-    username = f"@{html.escape(user.username)}" if user and user.username else s["not_set"]
+    name = html.escape(user.first_name) if user and user.first_name else default_name
 
     if lang == "km":
-        greeting = f"👋 សូមស្វាគមន៍ <b>{name}</b>!\nសូមស្វាគមន៍មកកាន់ <b>{s['welcome_title']}</b> 🎒"
+        text = (
+            f"👋 សូមស្វាគមន៍ <b>{name}</b> មកកាន់\n"
+            f"🏫 <b>{s['welcome_title']}</b> 🎒\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"{s['store_intro']}\n\n"
+            f"📍 <b>ទីតាំង:</b> {s['location_val']}\n"
+            f"🕒 <b>ម៉ោងធ្វើការ:</b> {s['hours_val']}\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"👇 <i>{s['prompt_select']}</i>"
+        )
     else:
-        greeting = f"👋 Welcome <b>{name}</b>!\nWelcome to <b>{s['welcome_title']}</b> 🎒"
-
-    text = (
-        f"{greeting}\n\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-        f"📋 <b>{s['parent_info']}</b>\n"
-        f"├ 👤 {s['name_label']}: <b>{name}</b>\n"
-        f"├ 🆔 {s['id_label']}: <code>{user_id}</code>\n"
-        f"└ 💬 {s['username_label']}: {username}\n\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-        f"🏫 <b>{s['store_info']}</b>\n"
-        f"├ 📍 {s['location_val']}\n"
-        f"├ 🕒 {s['hours_val']}\n"
-        f"└ 📦 {s['stock_sync_val']}\n\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-        f"📖 <b>{s['services_title']}</b>\n"
-        f"├ {s['service_1']}\n"
-        f"├ {s['service_2']}\n"
-        f"├ {s['service_3']}\n"
-        f"└ {s['service_4']}\n\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-        f"💬 <i>{s['prompt_select']}</i>"
-    )
+        text = (
+            f"👋 Welcome <b>{name}</b> to\n"
+            f"🏫 <b>{s['welcome_title']}</b> 🎒\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"{s['store_intro']}\n\n"
+            f"📍 <b>Location:</b> {s['location_val']}\n"
+            f"🕒 <b>Hours:</b> {s['hours_val']}\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"👇 <i>{s['prompt_select']}</i>"
+        )
 
     keyboard = [
         [InlineKeyboardButton(s["btn_stock"], callback_data="nav:cats")],
-        [InlineKeyboardButton(s["btn_guide"], callback_data="nav:guide")],
-        [InlineKeyboardButton(s["btn_policy"], callback_data="nav:policy")],
+        [
+            InlineKeyboardButton(s["btn_guide"], callback_data="nav:guide"),
+            InlineKeyboardButton(s["btn_policy"], callback_data="nav:policy"),
+        ],
         [InlineKeyboardButton(s["btn_contact"], callback_data="nav:contact")],
         # Dedicated 1-Tap Language Switch Button
         [InlineKeyboardButton(s["switch_btn"], callback_data=f"lang:{s['switch_target']}")],
@@ -876,10 +852,12 @@ def get_item_card_view(c_idx: int, i_idx: int, lang: str = "km") -> Tuple[str, I
     lines.append("━━━━━━━━━━━━━━━━━━")
     text = "\n".join(lines)
 
+    contact_url = f"https://t.me/{STORE_CONTACT_USERNAME}"
     buttons = [
-        [InlineKeyboardButton(s["btn_refresh"], callback_data=f"ref:{c_idx}:{i_idx}")],
+        [InlineKeyboardButton(s["btn_chat_order"], url=contact_url)],
         [
             InlineKeyboardButton(s["btn_back"], callback_data=f"cat:{c_idx}"),
+            InlineKeyboardButton(s["btn_refresh"], callback_data=f"ref:{c_idx}:{i_idx}"),
             InlineKeyboardButton(s["btn_main_menu"], callback_data="nav:main"),
         ],
     ]

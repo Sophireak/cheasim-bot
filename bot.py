@@ -502,6 +502,7 @@ class InventoryManager:
         unit_price_riel: int,
         total_riel: int,
         staff_name: str,
+        payment_method: str = "Cash",
     ) -> bool:
         """Appends sale record to 'Sales_Log' worksheet in Google Sheets."""
         try:
@@ -512,7 +513,7 @@ class InventoryManager:
             try:
                 sales_ws = spreadsheet.worksheet("Sales_Log")
             except gspread.WorksheetNotFound:
-                sales_ws = spreadsheet.add_worksheet(title="Sales_Log", rows=1000, cols=10)
+                sales_ws = spreadsheet.add_worksheet(title="Sales_Log", rows=1000, cols=11)
                 sales_ws.append_row(
                     [
                         "Date",
@@ -524,11 +525,34 @@ class InventoryManager:
                         "Unit Price Raw",
                         "Unit Price (៛)",
                         "Total (៛)",
+                        "Payment Method",
                         "Staff Member",
                     ]
                 )
-            sales_ws.append_row(
-                [
+
+            # Check existing headers for payment method column
+            try:
+                headers = [str(h).strip().lower() for h in sales_ws.row_values(1)]
+                has_payment = any("payment" in h or "វិធី" in h or "ទូទាត់" in h for h in headers)
+            except Exception:
+                has_payment = True
+
+            if has_payment:
+                row_data = [
+                    date_str,
+                    time_str,
+                    cat_name,
+                    item_name,
+                    size,
+                    qty,
+                    str(unit_price_raw),
+                    unit_price_riel,
+                    total_riel,
+                    payment_method,
+                    staff_name,
+                ]
+            else:
+                row_data = [
                     date_str,
                     time_str,
                     cat_name,
@@ -540,8 +564,9 @@ class InventoryManager:
                     total_riel,
                     staff_name,
                 ]
-            )
-            logger.info("Logged sale to 'Sales_Log' sheet: %s %s x%d (%d ៛)", item_name, size, qty, total_riel)
+
+            sales_ws.append_row(row_data)
+            logger.info("Logged sale to 'Sales_Log' sheet: %s %s x%d (%d ៛) [%s]", item_name, size, qty, total_riel, payment_method)
             return True
         except Exception as e:
             logger.error("Failed to append sale row to Google Sheet: %s", e)
@@ -555,6 +580,7 @@ class InventoryManager:
         qty: int,
         unit_price_raw: Any,
         staff_name: str,
+        payment_method: str = "Cash",
     ) -> int:
         """
         Logs a sale transaction in RAM cache immediately, then writes to 'Sales_Log' in Google Sheets in background.
@@ -576,6 +602,7 @@ class InventoryManager:
             "unit_price_raw": unit_price_raw,
             "unit_riel": unit_riel,
             "total_riel": total_riel,
+            "payment_method": payment_method,
             "staff_name": staff_name,
         }
         self.today_sales.append(sale_record)
@@ -595,11 +622,65 @@ class InventoryManager:
                     unit_riel,
                     total_riel,
                     staff_name,
+                    payment_method,
                 )
             )
         except RuntimeError:
             pass
         return total_riel
+
+    def _hydrate_sales_from_sheet_sync(self) -> List[Dict[str, Any]]:
+        """Loads today's transactions from Google Sheets 'Sales_Log' to survive bot restarts."""
+        try:
+            if self.client is None:
+                self._init_client()
+            assert self.client is not None
+            spreadsheet = self.client.open(self.sheet_name)
+            try:
+                sales_ws = spreadsheet.worksheet("Sales_Log")
+            except gspread.WorksheetNotFound:
+                return []
+
+            records = sales_ws.get_all_records()
+            today_str = time.strftime("%d-%b-%Y").strip().lower()
+            today_records = []
+            for r in records:
+                row_date = str(r.get("Date", "")).strip().lower()
+                if row_date == today_str:
+                    qty = parse_quantity(r.get("Quantity", 1))
+                    unit_riel = parse_riel_amount(r.get("Unit Price (៛)") or r.get("Unit Price Raw") or 0)
+                    total_riel = parse_riel_amount(r.get("Total (៛)") or (unit_riel * qty))
+                    payment_method = str(r.get("Payment Method") or "Cash").strip()
+                    today_records.append({
+                        "date": time.strftime("%d-%b-%Y"),
+                        "time": str(r.get("Time", "")).strip(),
+                        "cat_name": str(r.get("Department", "")).strip(),
+                        "item_name": str(r.get("Item Name", "")).strip(),
+                        "size": str(r.get("Size", "")).strip(),
+                        "qty": qty,
+                        "unit_price_raw": r.get("Unit Price Raw", unit_riel),
+                        "unit_riel": unit_riel,
+                        "total_riel": total_riel,
+                        "payment_method": payment_method,
+                        "staff_name": str(r.get("Staff Member", "")).strip(),
+                    })
+            logger.info("Hydrated %d today's sales from Google Sheet 'Sales_Log'.", len(today_records))
+            return today_records
+        except Exception as e:
+            logger.error("Failed to hydrate sales from Google Sheet: %s", e)
+            return []
+
+    async def refresh_today_sales(self) -> List[Dict[str, Any]]:
+        """Refreshes today's sales cache from Google Sheets in a worker thread."""
+        records = await asyncio.to_thread(self._hydrate_sales_from_sheet_sync)
+        if records or not self.today_sales:
+            self.today_sales = records
+        return self.today_sales
+
+    def get_today_sales(self) -> List[Dict[str, Any]]:
+        """Returns sales for today's calendar date, filtering out previous dates on midnight rollover."""
+        today_str = time.strftime("%d-%b-%Y").strip().lower()
+        return [s for s in self.today_sales if s.get("date", "").strip().lower() == today_str]
 
     def _clear_sales_log_sync(self) -> bool:
         """Clears rows 2+ in 'Sales_Log' worksheet, preserving Row 1 headers."""
@@ -678,6 +759,15 @@ class InventoryManager:
                 self._cached_records = records
                 self._last_fetch_time = now
                 self._build_index(records)
+
+                # Hydrate today's sales transactions to survive restarts
+                try:
+                    today_sales = await asyncio.to_thread(self._hydrate_sales_from_sheet_sync)
+                    if today_sales or not self.today_sales:
+                        self.today_sales = today_sales
+                except Exception as ex:
+                    logger.warning("Could not hydrate today sales during refresh: %s", ex)
+
                 return True
             except Exception as e:
                 logger.error("Failed to fetch inventory from Google Sheets: %s", e, exc_info=True)
@@ -1011,8 +1101,9 @@ def get_admin_data_view(lang: str = "km") -> Tuple[str, InlineKeyboardMarkup]:
     """Renders the Data Management and Test Reset view for Admin."""
     s = STRINGS.get(lang, STRINGS["km"])
     sheet_name = inventory_mgr.sheet_name
-    sales_count = len(inventory_mgr.today_sales)
-    total_rev = sum(sale["total_riel"] for sale in inventory_mgr.today_sales)
+    sales = inventory_mgr.get_today_sales()
+    sales_count = len(sales)
+    total_rev = sum(sale["total_riel"] for sale in sales)
     metrics = inventory_mgr.get_stock_metrics()
 
     if lang == "km":
@@ -1065,7 +1156,7 @@ def get_admin_sales_view(lang: str = "km") -> Tuple[str, InlineKeyboardMarkup]:
     """Renders the Daily Sales & Revenue POS dashboard."""
     s = STRINGS.get(lang, STRINGS["km"])
     today_str = time.strftime("%d-%b-%Y")
-    sales = inventory_mgr.today_sales
+    sales = inventory_mgr.get_today_sales()
     total_units = sum(sale["qty"] for sale in sales)
     total_rev = sum(sale["total_riel"] for sale in sales)
 
@@ -1083,9 +1174,10 @@ def get_admin_sales_view(lang: str = "km") -> Tuple[str, InlineKeyboardMarkup]:
         else:
             text += f"<b>📦 {s['admin_sales_recent']}</b>\n"
             for sale in sales[-10:]:
+                pay_tag = f" <i>[{html.escape(sale.get('payment_method', 'Cash'))}]</i>" if sale.get("payment_method") else ""
                 text += (
                     f"├ {sale['time']} • <b>{html.escape(sale['item_name'])} ({html.escape(sale['size'])})</b> "
-                    f"x{sale['qty']} = {format_riel_price(sale['total_riel'])}\n"
+                    f"x{sale['qty']} = {format_riel_price(sale['total_riel'])}{pay_tag}\n"
                 )
     else:
         text = (
@@ -1101,9 +1193,10 @@ def get_admin_sales_view(lang: str = "km") -> Tuple[str, InlineKeyboardMarkup]:
         else:
             text += "<b>📦 Recent Sales Today:</b>\n"
             for sale in sales[-10:]:
+                pay_tag = f" <i>[{html.escape(sale.get('payment_method', 'Cash'))}]</i>" if sale.get("payment_method") else ""
                 text += (
                     f"├ {sale['time']} • <b>{html.escape(sale['item_name'])} ({html.escape(sale['size'])})</b> "
-                    f"x{sale['qty']} = {format_riel_price(sale['total_riel'])}\n"
+                    f"x{sale['qty']} = {format_riel_price(sale['total_riel'])}{pay_tag}\n"
                 )
 
     keyboard = [
@@ -1368,6 +1461,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             if data == "adm:dash":
                 text, reply_markup = get_admin_dashboard_view(update.effective_user, lang=lang)
             elif data == "adm:sales":
+                await inventory_mgr.refresh_today_sales()
                 text, reply_markup = get_admin_sales_view(lang=lang)
             elif data == "adm:data":
                 text, reply_markup = get_admin_data_view(lang=lang)

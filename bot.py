@@ -14,6 +14,7 @@ Features:
 
 import asyncio
 import base64
+from datetime import datetime, timezone, timedelta
 import html
 import json
 import logging
@@ -21,6 +22,14 @@ import os
 import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
+
+# Cambodia Standard Time (UTC+7)
+CAMBODIA_TZ = timezone(timedelta(hours=7))
+
+
+def get_now_cambodia() -> datetime:
+    """Returns current datetime strictly in Cambodia (UTC+7) timezone."""
+    return datetime.now(CAMBODIA_TZ)
 
 from dotenv import load_dotenv
 from google.oauth2.service_account import Credentials
@@ -176,6 +185,8 @@ STRINGS: Dict[str, Dict[str, str]] = {
         "admin_btn_confirm_clear": "⚠️ បញ្ជាក់លុបទិន្នន័យតេស្ត",
         "admin_btn_cancel": "❌ បោះបង់",
         "admin_sales_cleared_toast": "✅ បានសម្អាតកំណត់ត្រាលក់តេស្តក្នុង Google Sheet រួចរាល់!",
+        "admin_btn_diag": "🔍 ពិនិត្យសន្លឹក Sheet (Diagnose)",
+        "admin_diag_title": "ការវិនិច្ឆ័យសន្លឹកទិន្នន័យ Google Sheets",
     },
     "en": {
         "switch_btn": "🇰🇭 ប្តូរទៅភាសាខ្មែរ",
@@ -269,6 +280,8 @@ STRINGS: Dict[str, Dict[str, str]] = {
         "admin_btn_confirm_clear": "⚠️ Yes, Clear Test Sales",
         "admin_btn_cancel": "❌ Cancel",
         "admin_sales_cleared_toast": "✅ Test sales logs cleared from Google Sheets!",
+        "admin_btn_diag": "🔍 Diagnose Sheet Connection",
+        "admin_diag_title": "Google Sheets Connection Diagnostics",
     },
 }
 
@@ -422,14 +435,33 @@ class InventoryManager:
         logger.info("Successfully authenticated with Google Sheets API (read/write mode).")
 
     def _get_worksheet(self) -> gspread.Worksheet:
-        """Caches worksheet reference to avoid repetitive sheet-search API calls."""
+        """Caches worksheet reference to avoid repetitive sheet-search API calls with smart tab discovery."""
         if self.client is None:
             self._init_client()
         assert self.client is not None
 
         if self._worksheet is None:
             spreadsheet = self.client.open(self.sheet_name)
-            self._worksheet = spreadsheet.worksheet("Stock")
+            try:
+                self._worksheet = spreadsheet.worksheet("Stock")
+            except gspread.WorksheetNotFound:
+                # 1. Search for any tab with 'stock', 'invent', 'ទំនិញ', 'ស្តុក', 'ឯកសណ្ឋាន' or 'sheet1'
+                target_ws = None
+                try:
+                    for ws in spreadsheet.worksheets():
+                        title_lower = ws.title.strip().lower()
+                        if any(k in title_lower for k in ["stock", "invent", "item", "ទំនិញ", "ស្តុក", "ឯកសណ្ឋាន", "sheet1"]):
+                            target_ws = ws
+                            break
+                except Exception:
+                    pass
+                # 2. Fallback to the very first tab
+                self._worksheet = target_ws if target_ws is not None else spreadsheet.sheet1
+                logger.warning(
+                    "Worksheet 'Stock' not found in spreadsheet '%s'. Falling back to tab '%s'.",
+                    self.sheet_name,
+                    self._worksheet.title,
+                )
         return self._worksheet
 
     def _fetch_from_sheets_sync(self) -> List[Dict[str, Any]]:
@@ -457,18 +489,50 @@ class InventoryManager:
         for idx, row in enumerate(records):
             row["_sheet_row"] = idx + 2
 
-        logger.info("Fetched %d raw records from Google Sheet '%s'.", len(records), self.sheet_name)
+        logger.info("Fetched %d raw records from Google Sheet '%s' (tab: '%s').", len(records), self.sheet_name, ws.title)
         return records
 
-    def _update_sheet_cell_sync(self, row_num: int, new_qty: int) -> bool:
-        """Writes updated quantity directly to Google Sheets cell."""
+    def _find_matching_row_sync(self, ws: gspread.Worksheet, expected_row: int, item_name: str, size: str) -> int:
+        """
+        Verifies if expected_row matches the item_name & size.
+        If the sheet was sorted or rows were inserted/deleted, scans rows to find the exact matching row.
+        """
+        try:
+            if expected_row >= 2:
+                row_vals = ws.row_values(expected_row)
+                row_text = " ".join(str(v).lower() for v in row_vals)
+                if item_name.lower() in row_text and (size.lower() in row_text or size.lower() == "standard"):
+                    return expected_row
+        except Exception:
+            pass
+
+        try:
+            all_records = ws.get_all_records()
+            for idx, r in enumerate(all_records, start=2):
+                r_item = str(get_row_field(r, "Item Name", "Item", "item name", "item", "ឈ្មោះទំនិញ", "មុខទំនិញ") or "")
+                r_size = str(get_row_field(r, "Size / Variation", "Size", "size", "ទំហំ") or "Standard")
+                if r_item.strip().lower() == item_name.strip().lower() and (
+                    r_size.strip().lower() == size.strip().lower() or size.lower() == "standard"
+                ):
+                    logger.info("Dynamic row relocation: '%s (%s)' moved from row %d -> row %d", item_name, size, expected_row, idx)
+                    return idx
+        except Exception as e:
+            logger.warning("Could not dynamically relocate row for '%s (%s)': %s", item_name, size, e)
+
+        return expected_row
+
+    def _update_sheet_cell_sync(self, expected_row: int, new_qty: int, item_name: str = "", size: str = "") -> bool:
+        """Writes updated quantity directly to Google Sheets cell with dynamic row verification."""
         try:
             ws = self._get_worksheet()
-            ws.update_cell(row_num, self.qty_col, new_qty)
-            logger.info("Successfully updated Google Sheet row %d, col %d to qty=%d", row_num, self.qty_col, new_qty)
+            target_row = expected_row
+            if item_name and size:
+                target_row = self._find_matching_row_sync(ws, expected_row, item_name, size)
+            ws.update_cell(target_row, self.qty_col, new_qty)
+            logger.info("Successfully updated Google Sheet row %d, col %d to qty=%d ('%s %s')", target_row, self.qty_col, new_qty, item_name, size)
             return True
         except Exception as e:
-            logger.error("Failed to update Google Sheet cell (%d, %d): %s", row_num, self.qty_col, e, exc_info=True)
+            logger.error("Failed to update Google Sheet cell (%d, %d): %s", expected_row, self.qty_col, e, exc_info=True)
             return False
 
     async def update_stock(self, c_idx: int, i_idx: int, v_idx: int, new_qty: int) -> Tuple[bool, int]:
@@ -485,8 +549,12 @@ class InventoryManager:
         var_row["Quantity"] = new_qty
         row_num = var_row.get("_sheet_row")
 
+        item_names = self.items_by_cat.get(c_idx, [])
+        item_name = item_names[i_idx] if i_idx < len(item_names) else ""
+        size = get_row_field(var_row, "Size / Variation", "Size", "size", "ទំហំ") or "Standard"
+
         if row_num:
-            asyncio.create_task(asyncio.to_thread(self._update_sheet_cell_sync, row_num, new_qty))
+            asyncio.create_task(asyncio.to_thread(self._update_sheet_cell_sync, row_num, new_qty, item_name, size))
 
         return True, new_qty
 
@@ -586,9 +654,9 @@ class InventoryManager:
         Logs a sale transaction in RAM cache immediately, then writes to 'Sales_Log' in Google Sheets in background.
         Returns total Riel amount.
         """
-        now = time.localtime()
-        date_str = time.strftime("%d-%b-%Y", now)
-        time_str = time.strftime("%I:%M %p", now)
+        now = get_now_cambodia()
+        date_str = now.strftime("%d-%b-%Y")
+        time_str = now.strftime("%I:%M %p")
         unit_riel = parse_riel_amount(unit_price_raw)
         total_riel = unit_riel * qty
 
@@ -642,7 +710,8 @@ class InventoryManager:
                 return []
 
             records = sales_ws.get_all_records()
-            today_str = time.strftime("%d-%b-%Y").strip().lower()
+            now_cam = get_now_cambodia()
+            today_str = now_cam.strftime("%d-%b-%Y").strip().lower()
             today_records = []
             for r in records:
                 row_date = str(r.get("Date", "")).strip().lower()
@@ -652,7 +721,7 @@ class InventoryManager:
                     total_riel = parse_riel_amount(r.get("Total (៛)") or (unit_riel * qty))
                     payment_method = str(r.get("Payment Method") or "Cash").strip()
                     today_records.append({
-                        "date": time.strftime("%d-%b-%Y"),
+                        "date": now_cam.strftime("%d-%b-%Y"),
                         "time": str(r.get("Time", "")).strip(),
                         "cat_name": str(r.get("Department", "")).strip(),
                         "item_name": str(r.get("Item Name", "")).strip(),
@@ -678,9 +747,54 @@ class InventoryManager:
         return self.today_sales
 
     def get_today_sales(self) -> List[Dict[str, Any]]:
-        """Returns sales for today's calendar date, filtering out previous dates on midnight rollover."""
-        today_str = time.strftime("%d-%b-%Y").strip().lower()
+        """Returns sales for today's calendar date strictly in Cambodia (UTC+7) timezone."""
+        today_str = get_now_cambodia().strftime("%d-%b-%Y").strip().lower()
         return [s for s in self.today_sales if s.get("date", "").strip().lower() == today_str]
+
+    def diagnose_sheet(self) -> Dict[str, Any]:
+        """Performs a live diagnostic check on Google Sheets connection, active tabs, and column mappings."""
+        try:
+            if self.client is None:
+                self._init_client()
+            assert self.client is not None
+            spreadsheet = self.client.open(self.sheet_name)
+            ws = self._get_worksheet()
+            headers = ws.row_values(1) if ws else []
+            all_vals = ws.get_all_values() if ws else []
+            row_count = max(0, len(all_vals) - 1)
+
+            # Check Sales_Log worksheet
+            sales_found = False
+            sales_rows = 0
+            try:
+                sales_ws = spreadsheet.worksheet("Sales_Log")
+                sales_found = True
+                sales_rows = max(0, len(sales_ws.get_all_values()) - 1)
+            except Exception:
+                pass
+
+            now_cambodia = get_now_cambodia().strftime("%d-%b-%Y %I:%M %p")
+
+            return {
+                "status": "OK",
+                "spreadsheet_title": spreadsheet.title,
+                "worksheet_title": ws.title,
+                "headers": headers,
+                "qty_col": self.qty_col,
+                "total_rows": row_count,
+                "sales_log_found": sales_found,
+                "sales_log_rows": sales_rows,
+                "total_categories": len(self.categories),
+                "total_items": sum(len(items) for items in self.items_by_cat.values()),
+                "cambodia_time": now_cambodia,
+            }
+        except Exception as e:
+            return {
+                "status": "ERROR",
+                "error": str(e),
+                "spreadsheet_title": self.sheet_name,
+                "cambodia_time": get_now_cambodia().strftime("%d-%b-%Y %I:%M %p"),
+            }
 
     def _clear_sales_log_sync(self) -> bool:
         """Clears rows 2+ in 'Sales_Log' worksheet, preserving Row 1 headers."""
@@ -1130,9 +1244,78 @@ def get_admin_data_view(lang: str = "km") -> Tuple[str, InlineKeyboardMarkup]:
         )
 
     keyboard = [
+        [InlineKeyboardButton(s["admin_btn_diag"], callback_data="adm:diag")],
         [InlineKeyboardButton(s["admin_btn_clear_sales"], callback_data="adm:clr:ask")],
         [InlineKeyboardButton(s["admin_btn_sync"], callback_data="adm:sync")],
         [InlineKeyboardButton(s["admin_btn_dash"], callback_data="adm:dash")],
+    ]
+    return text, InlineKeyboardMarkup(keyboard)
+
+
+def get_admin_diag_view(lang: str = "km") -> Tuple[str, InlineKeyboardMarkup]:
+    """Renders a live diagnostic check on the Google Sheet configuration."""
+    s = STRINGS.get(lang, STRINGS["km"])
+    diag = inventory_mgr.diagnose_sheet()
+
+    if diag.get("status") == "OK":
+        headers_str = ", ".join(diag.get("headers", [])) or "None"
+        sales_str = (
+            f"✅ រកឃើញ ({diag['sales_log_rows']} ជួរ)"
+            if diag.get("sales_log_found")
+            else "⚠️ មិនទាន់បង្កើត (នឹងបង្កើតស្វ័យប្រវត្តិពេលលក់លើកដំបូង)"
+        )
+        if lang == "km":
+            text = (
+                f"🔍 <b>{s['admin_diag_title']}</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                f"📄 <b>Spreadsheet:</b> <code>{html.escape(diag['spreadsheet_title'])}</code>\n"
+                f"📑 <b>Active Tab:</b> <code>{html.escape(diag['worksheet_title'])}</code> (ជោគជ័យ ✅)\n"
+                f"📦 <b>ចំនួនជួរទំនិញ:</b> {diag['total_rows']} ជួរ ({diag['total_categories']} ផ្នែក)\n"
+                f"🔢 <b>ជួរឈរ Quantity:</b> ជួរទី {diag['qty_col']}\n"
+                f"📋 <b>ក្បាលជួរ (Headers):</b>\n<code>{html.escape(headers_str)}</code>\n\n"
+                f"📊 <b>សន្លឹក Sales_Log:</b> {sales_str}\n"
+                f"🕒 <b>ម៉ោងកម្ពុជា (UTC+7):</b> {diag['cambodia_time']}\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "✅ <i>ការតភ្ជាប់ជាមួយ Google Sheets ដំណើរការយ៉ាងរលូន!</i>"
+            )
+        else:
+            text = (
+                f"🔍 <b>{s['admin_diag_title']}</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                f"📄 <b>Spreadsheet:</b> <code>{html.escape(diag['spreadsheet_title'])}</code>\n"
+                f"📑 <b>Active Tab:</b> <code>{html.escape(diag['worksheet_title'])}</code> (Connected ✅)\n"
+                f"📦 <b>Stocked Rows:</b> {diag['total_rows']} rows ({diag['total_categories']} departments)\n"
+                f"🔢 <b>Quantity Column:</b> Column #{diag['qty_col']}\n"
+                f"📋 <b>Detected Headers:</b>\n<code>{html.escape(headers_str)}</code>\n\n"
+                f"📊 <b>Sales_Log Worksheet:</b> {sales_str}\n"
+                f"🕒 <b>Cambodia Local Time:</b> {diag['cambodia_time']}\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "✅ <i>Google Sheets connection is healthy and verified!</i>"
+            )
+    else:
+        err = html.escape(str(diag.get("error", "Unknown error")))
+        if lang == "km":
+            text = (
+                f"🚨 <b>{s['admin_diag_title']} (បរាជ័យ)</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                f"📄 <b>Spreadsheet:</b> <code>{html.escape(diag['spreadsheet_title'])}</code>\n"
+                f"❌ <b>កំហុស:</b> <code>{err}</code>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "⚠️ <i>សូមពិនិត្យមើលថាឈ្មោះ Google Sheet ត្រឹមត្រូវ និងបាន Share ទៅ Service Account Email ឬនៅ។</i>"
+            )
+        else:
+            text = (
+                f"🚨 <b>{s['admin_diag_title']} (Failed)</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                f"📄 <b>Spreadsheet:</b> <code>{html.escape(diag['spreadsheet_title'])}</code>\n"
+                f"❌ <b>Error:</b> <code>{err}</code>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "⚠️ <i>Please ensure the Google Sheet name matches and is shared with your Service Account email.</i>"
+            )
+
+    keyboard = [
+        [InlineKeyboardButton("🔄 ពិនិត្យឡើងវិញ" if lang == "km" else "🔄 Refresh Diagnostics", callback_data="adm:diag")],
+        [InlineKeyboardButton(s["admin_btn_dash"], callback_data="adm:data")],
     ]
     return text, InlineKeyboardMarkup(keyboard)
 
@@ -1155,7 +1338,7 @@ def get_admin_data_confirm_view(lang: str = "km") -> Tuple[str, InlineKeyboardMa
 def get_admin_sales_view(lang: str = "km") -> Tuple[str, InlineKeyboardMarkup]:
     """Renders the Daily Sales & Revenue POS dashboard."""
     s = STRINGS.get(lang, STRINGS["km"])
-    today_str = time.strftime("%d-%b-%Y")
+    today_str = get_now_cambodia().strftime("%d-%b-%Y")
     sales = inventory_mgr.get_today_sales()
     total_units = sum(sale["qty"] for sale in sales)
     total_rev = sum(sale["total_riel"] for sale in sales)
@@ -1465,6 +1648,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 text, reply_markup = get_admin_sales_view(lang=lang)
             elif data == "adm:data":
                 text, reply_markup = get_admin_data_view(lang=lang)
+            elif data == "adm:diag":
+                text, reply_markup = get_admin_diag_view(lang=lang)
             elif data == "adm:clr:ask":
                 text, reply_markup = get_admin_data_confirm_view(lang=lang)
             elif data == "adm:clr:do":
